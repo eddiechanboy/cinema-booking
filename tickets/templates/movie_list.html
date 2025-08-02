@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+
+{% block title %}電影清單{% endblock %}
+
+{% block content %}
+  <h1 class="mb-4">🎬 熱門電影</h1>
+
+  <div class="row row-cols-1 row-cols-md-2 row-cols-lg-3 g-4">
+    {% for movie in movies %}
+      <div class="col">
+        <div class="card h-100 shadow-sm">
+          {% if movie.image_url %}
+            <img src="{{ movie.image_url }}" class="card-img-top" style="height: 300px; object-fit: cover;" alt="{{ movie.title }}">
+          {% endif %}
+          <div class="card-body d-flex flex-column">
+            <h5 class="card-title">{{ movie.title }}</h5>
+            <p class="card-text text-muted">{{ movie.duration }} 分鐘</p>
+            <p class="card-text">{{ movie.description|truncatewords:20 }}</p>
+            <a href="{% url 'screening_list' movie.id %}" class="btn btn-primary mt-auto">查看場次</a>
+          </div>
+        </div>
+      </div>
+    {% empty %}
+      <div class="col">
+        <div class="alert alert-warning text-center">目前尚無電影</div>
+      </div>
+    {% endfor %}
+  </div>
+{% endblock %}

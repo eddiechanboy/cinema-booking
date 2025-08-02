@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+{% block title %}選擇座位{% endblock %}
+
+{% block content %}
+  <h2>🎟️ 選擇座位 - {{ screening.movie.title }} ({{ screening.screen.name }})</h2>
+  {% if error %}
+    <div class="alert alert-danger">{{ error }}</div>
+  {% endif %}
+
+  <form method="POST">
+    {% csrf_token %}
+    <div class="row">
+      {% for seat in seats %}
+        <div class="col-2 mb-2">
+          <label class="form-check-label">
+            {% if seat.is_reserved %}
+              <input type="checkbox" disabled class="form-check-input">
+              <span class="text-muted">{{ seat.seat_number }}（已訂）</span>
+            {% else %}
+              <input type="checkbox" name="seats" value="{{ seat.id }}" class="form-check-input">
+              {{ seat.seat_number }}
+            {% endif %}
+          </label>
+        </div>
+      {% endfor %}
+    </div>
+    <button type="submit" class="btn btn-primary mt-3">確認預訂</button>
+  </form>
+{% endblock %}
