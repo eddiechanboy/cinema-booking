@@ -1,0 +1,68 @@
+name: Deploy Django to GCP COS VM
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+env:
+  IMAGE_NAME: django-app
+  REGION: ${{ secrets.GCP_REGION }}
+  PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+  REPO: app-repo
+  AR_HOST: ${{ secrets.GCP_REGION }}-docker.pkg.dev
+  IMAGE_TAG: ${{ github.sha }}
+  FULL_IMAGE: ${{ secrets.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/app-repo/django-app:${{ github.sha }}
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Setup gcloud CLI
+      uses: google-github-actions/setup-gcloud@v2
+      with:
+        project_id: ${{ secrets.GCP_PROJECT_ID }}
+        service_account_key: ${{ secrets.GCP_SA_KEY }}
+        export_default_credentials: true
+
+    - name: Configure Docker for Artifact Registry
+      run: gcloud auth configure-docker ${{ env.AR_HOST }}
+
+    - name: Build Docker image
+      run: docker build -t $FULL_IMAGE .
+
+    - name: Push image to Artifact Registry
+      run: docker push $FULL_IMAGE
+
+    - name: Start SSH agent
+      uses: webfactory/ssh-agent@v0.9.0
+      with:
+        ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+
+    - name: Add VM to known hosts
+      run: ssh-keyscan -H ${{ secrets.VM_HOST }} >> ~/.ssh/known_hosts
+
+    - name: Deploy on remote VM
+      run: |
+        ssh ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }} << EOF
+        set -e
+        echo "[1] Pulling latest image..."
+        gcloud auth configure-docker ${{ env.AR_HOST }} -q || true
+        sudo docker pull $FULL_IMAGE
+
+        echo "[2] Stopping old container if exists..."
+        sudo docker stop django-app || true
+        sudo docker rm django-app || true
+
+        echo "[3] Starting new container..."
+        sudo docker run -d --name django-app \
+          -p 8080:8080 \
+          --restart=always \
+          $FULL_IMAGE
+
+        echo "[4] Done! Django app deployed."
+        EOF
