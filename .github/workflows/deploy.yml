@@ -1,43 +1,84 @@
-    - name: Start SSH agent
-      uses: webfactory/ssh-agent@v0.9.0
-      with:
-        ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+name: Deploy Django to GCP COS VM
 
-    - name: Add VM to known hosts
-      run: ssh-keyscan -H ${{ secrets.VM_HOST }} >> ~/.ssh/known_hosts
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
 
-    # 將 SA 金鑰寫成檔案並複製到 VM
-    - name: Upload SA key to VM
-      run: |
-        printf "%s" '${{ secrets.GCP_SA_KEY }}' > ar_key.json
-        scp -q ar_key.json ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }}:/tmp/ar_key.json
-        rm -f ar_key.json
+env:
+  IMAGE_NAME: django-app
+  REGION: ${{ secrets.GCP_REGION }}
+  PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+  REPO: app-repo
+  AR_HOST: ${{ secrets.GCP_REGION }}-docker.pkg.dev
+  IMAGE_TAG: ${{ github.sha }}
+  FULL_IMAGE: ${{ secrets.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/app-repo/django-app:${{ github.sha }}
 
-    # 在 VM 上登入 Artifact Registry、拉 image、重啟容器
-    - name: Remote deploy on VM
-      env:
-        REGION: ${{ secrets.GCP_REGION }}
-        FULL_IMAGE: ${{ env.FULL_IMAGE }}
-      run: |
-        ssh ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }} << 'EOF'
-        set -euxo pipefail
-        # 1) 用 _json_key 登入 Artifact Registry
-        sudo docker logout ${REGION}-docker.pkg.dev || true
-        sudo docker login -u _json_key --password-stdin ${REGION}-docker.pkg.dev < /tmp/ar_key.json
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
 
-        # 2) 拉最新 image
-        sudo docker pull ${FULL_IMAGE}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-        # 3) 停舊容器（若在）
-        sudo docker stop django-app || true
-        sudo docker rm django-app || true
+      - name: Setup gcloud CLI
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: ${{ secrets.GCP_PROJECT_ID }}
+          service_account_key: ${{ secrets.GCP_SA_KEY }}
+          export_default_credentials: true
 
-        # 4) 跑新容器（依需要調整埠/環境變數/volumes）
-        sudo docker run -d --name django-app \
-          -p 8080:8080 \
-          --restart=always \
-          ${FULL_IMAGE}
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker ${{ env.AR_HOST }}
 
-        # 5) 清理
-        rm -f /tmp/ar_key.json
-        EOF
+      - name: Build Docker image
+        run: docker build -t $FULL_IMAGE .
+
+      - name: Push image to Artifact Registry
+        run: docker push $FULL_IMAGE
+
+      - name: Start SSH agent
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+
+      - name: Add VM to known hosts
+        run: ssh-keyscan -H ${{ secrets.VM_HOST }} >> ~/.ssh/known_hosts
+
+      # 將 SA 金鑰寫成檔案並複製到 VM
+      - name: Upload SA key to VM
+        run: |
+          printf "%s" '${{ secrets.GCP_SA_KEY }}' > ar_key.json
+          scp -q ar_key.json ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }}:/tmp/ar_key.json
+          rm -f ar_key.json
+
+      # 在 VM 上登入 Artifact Registry、拉 image、重啟容器
+      - name: Remote deploy on VM
+        env:
+          REGION: ${{ secrets.GCP_REGION }}
+          FULL_IMAGE: ${{ env.FULL_IMAGE }}
+        run: |
+          ssh ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }} << 'EOF'
+          set -euxo pipefail
+
+          # 1) 用 _json_key 登入 Artifact Registry（COS 無需 gcloud）
+          sudo docker logout ${REGION}-docker.pkg.dev || true
+          sudo docker login -u _json_key --password-stdin ${REGION}-docker.pkg.dev < /tmp/ar_key.json
+
+          # 2) 拉最新 image
+          sudo docker pull ${FULL_IMAGE}
+
+          # 3) 停舊容器
+          sudo docker stop django-app || true
+          sudo docker rm django-app || true
+
+          # 4) 跑新容器（按需要調整埠/環境變數/volume）
+          sudo docker run -d --name django-app \
+            -p 8080:8080 \
+            --restart=always \
+            ${FULL_IMAGE}
+
+          # 5) 清理
+          rm -f /tmp/ar_key.json
+          EOF
