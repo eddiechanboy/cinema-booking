@@ -9,7 +9,7 @@ env:
   IMAGE_NAME: django-app
   REGION: ${{ secrets.GCP_REGION }}
   PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
-  REPO: app-repo
+  REPO: django-demo
   IMAGE_TAG: ${{ github.sha }}
   FULL_IMAGE: ${{ secrets.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/app-repo/django-app:${{ github.sha }}
 
