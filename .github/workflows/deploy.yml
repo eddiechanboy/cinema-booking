@@ -19,6 +19,16 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      # 0) 先驗證必要 Secrets 都存在，缺哪個就直接失敗並提示
+      - name: Validate required secrets
+        run: |
+          test -n "${{ secrets.GCP_PROJECT_ID }}"  || { echo "Missing GCP_PROJECT_ID"; exit 1; }
+          test -n "${{ secrets.GCP_REGION }}"      || { echo "Missing GCP_REGION"; exit 1; }
+          test -n "${{ secrets.GCP_SA_KEY }}"      || { echo "Missing GCP_SA_KEY"; exit 1; }
+          test -n "${{ secrets.VM_HOST }}"         || { echo "Missing VM_HOST"; exit 1; }
+          test -n "${{ secrets.VM_USER }}"         || { echo "Missing VM_USER"; exit 1; }
+          test -n "${{ secrets.SSH_PRIVATE_KEY }}" || { echo "Missing SSH_PRIVATE_KEY"; exit 1; }
+
       - name: Checkout code
         uses: actions/checkout@v4
 
@@ -55,29 +65,26 @@ jobs:
 
       # 在 VM 上登入 Artifact Registry、拉 image、重啟容器
       - name: Remote deploy on VM
-        env:
-          REGION: ${{ secrets.GCP_REGION }}
-          FULL_IMAGE: ${{ env.FULL_IMAGE }}
         run: |
-          ssh ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }} << 'EOF'
+          ssh ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }} << EOF
           set -euxo pipefail
 
-          # 1) 用 _json_key 登入 Artifact Registry（COS 無需 gcloud）
-          sudo docker logout ${REGION}-docker.pkg.dev || true
-          sudo docker login -u _json_key --password-stdin ${REGION}-docker.pkg.dev < /tmp/ar_key.json
+          # 1) 用 _json_key 登入 Artifact Registry（COS 不需 gcloud）
+          sudo docker logout ${{ secrets.GCP_REGION }}-docker.pkg.dev || true
+          sudo docker login -u _json_key --password-stdin ${{ secrets.GCP_REGION }}-docker.pkg.dev < /tmp/ar_key.json
 
           # 2) 拉最新 image
-          sudo docker pull ${FULL_IMAGE}
+          sudo docker pull ${{ env.FULL_IMAGE }}
 
-          # 3) 停舊容器
+          # 3) 停舊容器（若存在）
           sudo docker stop django-app || true
           sudo docker rm django-app || true
 
-          # 4) 跑新容器（按需要調整埠/環境變數/volume）
+          # 4) 跑新容器（依需要調整埠/環境變數/volume）
           sudo docker run -d --name django-app \
             -p 8080:8080 \
             --restart=always \
-            ${FULL_IMAGE}
+            ${{ env.FULL_IMAGE }}
 
           # 5) 清理
           rm -f /tmp/ar_key.json
