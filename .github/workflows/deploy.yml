@@ -19,25 +19,14 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # 0) 先驗證必要 Secrets，都從 env 帶入避免多行 JSON 造成 "too many arguments"
-      - name: Validate required secrets
-        env:
-          GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
-          GCP_REGION: ${{ secrets.GCP_REGION }}
-          GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
-          VM_HOST: ${{ secrets.VM_HOST }}
-          VM_USER: ${{ secrets.VM_USER }}
-          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+      - name: Check required secrets
         run: |
-          set -euo pipefail
-          for name in GCP_PROJECT_ID GCP_REGION GCP_SA_KEY VM_HOST VM_USER SSH_PRIVATE_KEY; do
-            val="${!name:-}"
-            if [ -z "$val" ]; then
-              echo "Missing $name"
+          for secret in GCP_PROJECT_ID GCP_REGION GCP_SA_KEY VM_HOST VM_USER SSH_PRIVATE_KEY; do
+            if [ -z "${{ secrets[$secret] }}" ]; then
+              echo "❌ Missing secret: $secret"
               exit 1
             fi
           done
-          echo "All required secrets present."
 
       - name: Checkout code
         uses: actions/checkout@v4
@@ -53,10 +42,10 @@ jobs:
         run: gcloud auth configure-docker ${{ env.AR_HOST }}
 
       - name: Build Docker image
-        run: docker build -t $FULL_IMAGE .
+        run: docker build -t "${{ env.FULL_IMAGE }}" .
 
       - name: Push image to Artifact Registry
-        run: docker push $FULL_IMAGE
+        run: docker push "${{ env.FULL_IMAGE }}"
 
       - name: Start SSH agent
         uses: webfactory/ssh-agent@v0.9.0
@@ -66,36 +55,27 @@ jobs:
       - name: Add VM to known hosts
         run: ssh-keyscan -H ${{ secrets.VM_HOST }} >> ~/.ssh/known_hosts
 
-      # 把服務帳戶金鑰寫成檔案並用 scp 傳到 VM（/tmp/ar_key.json）
       - name: Upload SA key to VM
         run: |
           printf "%s" '${{ secrets.GCP_SA_KEY }}' > ar_key.json
           scp -q ar_key.json ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }}:/tmp/ar_key.json
           rm -f ar_key.json
 
-      # 在 VM 上：用 _json_key 登入 Artifact Registry、pull 最新 image、重啟容器
       - name: Remote deploy on VM
+        env:
+          REGION: ${{ secrets.GCP_REGION }}
+          FULL_IMAGE: ${{ env.FULL_IMAGE }}
         run: |
           ssh ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }} << 'EOF'
           set -euxo pipefail
-
-          # 1) 登入 Artifact Registry（COS 無需 gcloud）
-          sudo docker logout ${{ secrets.GCP_REGION }}-docker.pkg.dev || true
-          sudo docker login -u _json_key --password-stdin ${{ secrets.GCP_REGION }}-docker.pkg.dev < /tmp/ar_key.json
-
-          # 2) 拉最新 image
-          sudo docker pull ${{ env.FULL_IMAGE }}
-
-          # 3) 停舊容器（若存在）
+          sudo docker logout ${REGION}-docker.pkg.dev || true
+          sudo docker login -u _json_key --password-stdin ${REGION}-docker.pkg.dev < /tmp/ar_key.json
+          sudo docker pull ${FULL_IMAGE}
           sudo docker stop django-app || true
           sudo docker rm django-app || true
-
-          # 4) 跑新容器（依需求調整埠/環境變數/volume）
           sudo docker run -d --name django-app \
             -p 8080:8080 \
             --restart=always \
-            ${{ env.FULL_IMAGE }}
-
-          # 5) 清理金鑰
+            ${FULL_IMAGE}
           rm -f /tmp/ar_key.json
           EOF
