@@ -10,7 +10,6 @@ env:
   REGION: ${{ secrets.GCP_REGION }}
   PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
   REPO: app-repo
-  AR_HOST: ${{ secrets.GCP_REGION }}-docker.pkg.dev
   IMAGE_TAG: ${{ github.sha }}
   FULL_IMAGE: ${{ secrets.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/app-repo/django-app:${{ github.sha }}
 
@@ -19,14 +18,25 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Check required secrets
+      # 0) 驗證 Secrets（用 env 帶入，再用 bash 間接展開檢查）
+      - name: Validate required secrets
+        env:
+          GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+          GCP_REGION: ${{ secrets.GCP_REGION }}
+          GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
+          VM_HOST: ${{ secrets.VM_HOST }}
+          VM_USER: ${{ secrets.VM_USER }}
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
         run: |
-          for secret in GCP_PROJECT_ID GCP_REGION GCP_SA_KEY VM_HOST VM_USER SSH_PRIVATE_KEY; do
-            if [ -z "${{ secrets[$secret] }}" ]; then
-              echo "❌ Missing secret: $secret"
+          set -euo pipefail
+          for name in GCP_PROJECT_ID GCP_REGION GCP_SA_KEY VM_HOST VM_USER SSH_PRIVATE_KEY; do
+            val="${!name:-}"
+            if [ -z "$val" ]; then
+              echo "Missing $name"
               exit 1
             fi
           done
+          echo "All required secrets present."
 
       - name: Checkout code
         uses: actions/checkout@v4
@@ -38,15 +48,32 @@ jobs:
           service_account_key: ${{ secrets.GCP_SA_KEY }}
           export_default_credentials: true
 
+      # 1) 登入 Artifact Registry（runner 端）
       - name: Configure Docker for Artifact Registry
-        run: gcloud auth configure-docker ${{ env.AR_HOST }}
+        run: |
+          REGION_RAW='${{ secrets.GCP_REGION }}'
+          REGION="$(printf "%s" "$REGION_RAW" | tr -d '\r\n' | xargs)"
+          REGISTRY="${REGION}-docker.pkg.dev"
+          echo "Using registry: $REGISTRY"
+          gcloud auth configure-docker "$REGISTRY"
 
+      # 2) Build image（顯示完整目標標籤避免為空）
       - name: Build Docker image
-        run: docker build -t "${{ env.FULL_IMAGE }}" .
+        run: |
+          IMG='${{ env.FULL_IMAGE }}'
+          IMG="$(printf "%s" "$IMG" | tr -d '\r\n' | xargs)"
+          echo "Building image: $IMG"
+          docker build -t "$IMG" .
 
+      # 3) Push image
       - name: Push image to Artifact Registry
-        run: docker push "${{ env.FULL_IMAGE }}"
+        run: |
+          IMG='${{ env.FULL_IMAGE }}'
+          IMG="$(printf "%s" "$IMG" | tr -d '\r\n' | xargs)"
+          echo "Pushing image: $IMG"
+          docker push "$IMG"
 
+      # 4) 準備 SSH 連線
       - name: Start SSH agent
         uses: webfactory/ssh-agent@v0.9.0
         with:
@@ -55,27 +82,43 @@ jobs:
       - name: Add VM to known hosts
         run: ssh-keyscan -H ${{ secrets.VM_HOST }} >> ~/.ssh/known_hosts
 
+      # 5) 將 SA 金鑰寫成檔案並用 scp 傳到 VM
       - name: Upload SA key to VM
         run: |
           printf "%s" '${{ secrets.GCP_SA_KEY }}' > ar_key.json
           scp -q ar_key.json ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }}:/tmp/ar_key.json
           rm -f ar_key.json
 
+      # 6) 在 VM 上：docker login / pull / restart
       - name: Remote deploy on VM
-        env:
-          REGION: ${{ secrets.GCP_REGION }}
-          FULL_IMAGE: ${{ env.FULL_IMAGE }}
         run: |
           ssh ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }} << 'EOF'
           set -euxo pipefail
-          sudo docker logout ${REGION}-docker.pkg.dev || true
-          sudo docker login -u _json_key --password-stdin ${REGION}-docker.pkg.dev < /tmp/ar_key.json
-          sudo docker pull ${FULL_IMAGE}
+
+          # 淨化區域並組出 registry
+          REGION_RAW='${{ secrets.GCP_REGION }}'
+          REGION="$(printf "%s" "$REGION_RAW" | tr -d '\r\n' | xargs)"
+          REGISTRY="${REGION}-docker.pkg.dev"
+
+          # 1) 登入 Artifact Registry（COS 無需 gcloud）
+          sudo docker logout "$REGISTRY" || true
+          sudo docker login -u _json_key --password-stdin "$REGISTRY" < /tmp/ar_key.json
+
+          # 2) 拉最新 image
+          FULL_IMAGE_RAW='${{ env.FULL_IMAGE }}'
+          FULL_IMAGE="$(printf "%s" "$FULL_IMAGE_RAW" | tr -d '\r\n' | xargs)"
+          sudo docker pull "$FULL_IMAGE"
+
+          # 3) 停舊容器（若存在）
           sudo docker stop django-app || true
           sudo docker rm django-app || true
+
+          # 4) 跑新容器（依需求調整埠/環境變數/volume）
           sudo docker run -d --name django-app \
             -p 8080:8080 \
             --restart=always \
-            ${FULL_IMAGE}
+            "$FULL_IMAGE"
+
+          # 5) 清理
           rm -f /tmp/ar_key.json
           EOF
