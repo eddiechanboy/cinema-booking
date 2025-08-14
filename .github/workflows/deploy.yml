@@ -18,7 +18,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # 0) 驗證 Secrets
+      # 0) 驗證 Secrets 是否存在
       - name: Validate required secrets
         env:
           GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
@@ -48,7 +48,7 @@ jobs:
           service_account_key: ${{ secrets.GCP_SA_KEY }}
           export_default_credentials: true
 
-      # 1) 在 runner 端登入 Artifact Registry（用 _json_key）
+      # 1) Runner 端登入 Artifact Registry（用 _json_key）
       - name: Docker login to Artifact Registry (runner)
         run: |
           set -euo pipefail
@@ -60,42 +60,47 @@ jobs:
           docker login -u _json_key --password-stdin "$REGISTRY" < sa.json
           echo "Logged in to $REGISTRY"
 
-      # 2) Build image
+      # 2) 建置並推送映像
       - name: Build Docker image
         run: |
+          set -euo pipefail
           IMG='${{ env.FULL_IMAGE }}'
           IMG="$(printf "%s" "$IMG" | tr -d '\r\n' | xargs)"
           echo "Building image: $IMG"
           docker build -t "$IMG" .
 
-      # 3) Push image
       - name: Push image to Artifact Registry
         run: |
+          set -euo pipefail
           IMG='${{ env.FULL_IMAGE }}'
           IMG="$(printf "%s" "$IMG" | tr -d '\r\n' | xargs)"
           echo "Pushing image: $IMG"
           docker push "$IMG"
 
-      # 4) SSH 準備
-      - name: Start SSH agent
-        uses: webfactory/ssh-agent@v0.9.0
-        with:
-          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+      # 3) 寫入私鑰檔並驗證格式、加入 known_hosts（取代 ssh-agent）
+      - name: Write SSH key & known_hosts
+        run: |
+          umask 077
+          printf "%s" '${{ secrets.SSH_PRIVATE_KEY }}' > id_vm
+          chmod 600 id_vm
+          ssh-keyscan -H ${{ secrets.VM_HOST }} >> ~/.ssh/known_hosts
 
-      - name: Add VM to known hosts
-        run: ssh-keyscan -H ${{ secrets.VM_HOST }} >> ~/.ssh/known_hosts
+      - name: Validate SSH key format
+        run: |
+          # 驗證是可讀的 OpenSSH 私鑰，且未加密（無 passphrase）
+          ssh-keygen -yf -f id_vm >/dev/null 2>&1 || { echo "Invalid or encrypted SSH_PRIVATE_KEY"; exit 1; }
 
-      # 5) 將 SA 金鑰傳到 VM
+      # 4) 將 SA 金鑰傳到 VM（用 -i id_vm）
       - name: Upload SA key to VM
         run: |
           printf "%s" '${{ secrets.GCP_SA_KEY }}' > ar_key.json
-          scp -q ar_key.json ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }}:/tmp/ar_key.json
+          scp -i id_vm -q ar_key.json ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }}:/tmp/ar_key.json
           rm -f ar_key.json
 
-      # 6) VM 上登入/拉取/重啟容器
+      # 5) 在 VM 登入/拉取/重啟容器（用 -i id_vm）
       - name: Remote deploy on VM
         run: |
-          ssh ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }} << 'EOF'
+          ssh -i id_vm ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }} << 'EOF'
           set -euxo pipefail
 
           REGION_RAW='${{ secrets.GCP_REGION }}'
