@@ -41,14 +41,18 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      # 正確的身分驗證流程：先 auth 再安裝 gcloud
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
       - name: Setup gcloud CLI
         uses: google-github-actions/setup-gcloud@v2
         with:
           project_id: ${{ secrets.GCP_PROJECT_ID }}
-          service_account_key: ${{ secrets.GCP_SA_KEY }}
-          export_default_credentials: true
 
-      # 1) Runner 端登入 Artifact Registry（用 _json_key）
+      # Runner 端先登入 Artifact Registry（用 _json_key）
       - name: Docker login to Artifact Registry (runner)
         run: |
           set -euo pipefail
@@ -60,7 +64,6 @@ jobs:
           docker login -u _json_key --password-stdin "$REGISTRY" < sa.json
           echo "Logged in to $REGISTRY"
 
-      # 2) 建置並推送映像
       - name: Build Docker image
         run: |
           set -euo pipefail
@@ -77,44 +80,50 @@ jobs:
           echo "Pushing image: $IMG"
           docker push "$IMG"
 
-      # 3) 寫入私鑰檔並驗證格式、加入 known_hosts（取代 ssh-agent）
-      - name: Write SSH key & known_hosts
+      # ⬇️ 徹底修正：建立 ~/.ssh 與 known_hosts + 寫入私鑰 + 加入 host key
+      - name: Prepare SSH (dir, key, known_hosts)
         run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.ssh"
+          chmod 700 "$HOME/.ssh"
+          touch "$HOME/.ssh/known_hosts"
+          chmod 644 "$HOME/.ssh/known_hosts"
           umask 077
-          printf "%s" '${{ secrets.SSH_PRIVATE_KEY }}' > id_vm
-          chmod 600 id_vm
-          ssh-keyscan -H ${{ secrets.VM_HOST }} >> ~/.ssh/known_hosts
+          printf "%s" '${{ secrets.SSH_PRIVATE_KEY }}' > "$HOME/.ssh/id_vm"
+          chmod 600 "$HOME/.ssh/id_vm"
+          # 預先抓取 host key；即使抓不到，稍後也用 StrictHostKeyChecking=accept-new 防呆
+          ssh-keyscan -H "${{ secrets.VM_HOST }}" >> "$HOME/.ssh/known_hosts" || true
 
       - name: Validate SSH key format
         run: |
-          # 驗證是可讀的 OpenSSH 私鑰，且未加密（無 passphrase）
-          ssh-keygen -yf -f id_vm >/dev/null 2>&1 || { echo "Invalid or encrypted SSH_PRIVATE_KEY"; exit 1; }
+          ssh-keygen -yf -f "$HOME/.ssh/id_vm" >/dev/null 2>&1 \
+            || { echo "Invalid or encrypted SSH_PRIVATE_KEY"; exit 1; }
 
-      # 4) 將 SA 金鑰傳到 VM（用 -i id_vm）
+      # 將 SA 金鑰傳到 VM（指定 -i 並關閉嚴格檢查，以免第一次連線卡住）
       - name: Upload SA key to VM
         run: |
           printf "%s" '${{ secrets.GCP_SA_KEY }}' > ar_key.json
-          scp -i id_vm -q ar_key.json ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }}:/tmp/ar_key.json
+          scp -i "$HOME/.ssh/id_vm" -o StrictHostKeyChecking=accept-new -q \
+            ar_key.json ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }}:/tmp/ar_key.json
           rm -f ar_key.json
 
-      # 5) 在 VM 登入/拉取/重啟容器（用 -i id_vm）
+      # 在 VM：docker login / pull / run（同樣帶 -i 與 accept-new）
       - name: Remote deploy on VM
         run: |
-          ssh -i id_vm ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }} << 'EOF'
+          ssh -i "$HOME/.ssh/id_vm" -o StrictHostKeyChecking=accept-new \
+            ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }} << 'EOF'
           set -euxo pipefail
 
           REGION_RAW='${{ secrets.GCP_REGION }}'
           REGION="$(printf "%s" "$REGION_RAW" | tr -d '\r\n' | xargs)"
           REGISTRY="${REGION}-docker.pkg.dev"
 
-          # 登入 Artifact Registry（COS 無需 gcloud）
           sudo docker logout "$REGISTRY" || true
           sudo docker login -u _json_key --password-stdin "$REGISTRY" < /tmp/ar_key.json
 
           FULL_IMAGE_RAW='${{ env.FULL_IMAGE }}'
           FULL_IMAGE="$(printf "%s" "$FULL_IMAGE_RAW" | tr -d '\r\n' | xargs)"
 
-          # 拉最新 image + 重啟
           sudo docker pull "$FULL_IMAGE"
           sudo docker stop django-app || true
           sudo docker rm django-app || true
