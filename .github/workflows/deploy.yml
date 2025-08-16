@@ -5,6 +5,15 @@ on:
     branches: [ "main" ]
   workflow_dispatch:
 
+# (可選) 同一時間只跑一次，新的會取消舊的
+concurrency:
+  group: deploy-to-vm
+  cancel-in-progress: true
+
+# (可選) 權限最小化
+permissions:
+  contents: read
+
 env:
   IMAGE_NAME: django-app
   REGION: ${{ secrets.GCP_REGION }}
@@ -41,18 +50,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      # 正確的身分驗證流程：先 auth 再安裝 gcloud
-      - name: Authenticate to Google Cloud
-        uses: google-github-actions/auth@v2
-        with:
-          credentials_json: ${{ secrets.GCP_SA_KEY }}
-
-      - name: Setup gcloud CLI
-        uses: google-github-actions/setup-gcloud@v2
-        with:
-          project_id: ${{ secrets.GCP_PROJECT_ID }}
-
-      # Runner 端先登入 Artifact Registry（用 _json_key）
+      # ✅ 不用 gcloud：直接用 _json_key 對 Artifact Registry 登入
       - name: Docker login to Artifact Registry (runner)
         run: |
           set -euo pipefail
@@ -80,7 +78,7 @@ jobs:
           echo "Pushing image: $IMG"
           docker push "$IMG"
 
-      # ⬇️ 徹底修正：建立 ~/.ssh 與 known_hosts + 寫入私鑰 + 加入 host key
+      # 準備 SSH（徹底處理 ~/.ssh/known_hosts 不存在問題）
       - name: Prepare SSH (dir, key, known_hosts)
         run: |
           set -euo pipefail
@@ -91,15 +89,14 @@ jobs:
           umask 077
           printf "%s" '${{ secrets.SSH_PRIVATE_KEY }}' > "$HOME/.ssh/id_vm"
           chmod 600 "$HOME/.ssh/id_vm"
-          # 預先抓取 host key；即使抓不到，稍後也用 StrictHostKeyChecking=accept-new 防呆
+          # 預先加入 host key；失敗也不阻擋，後續 accept-new
           ssh-keyscan -H "${{ secrets.VM_HOST }}" >> "$HOME/.ssh/known_hosts" || true
 
       - name: Validate SSH key format
         run: |
-          ssh-keygen -yf -f "$HOME/.ssh/id_vm" >/dev/null 2>&1 \
-            || { echo "Invalid or encrypted SSH_PRIVATE_KEY"; exit 1; }
+          ssh-keygen -yf -f "$HOME/.ssh/id_vm" >/dev/null 2>&1 || { echo "Invalid or encrypted SSH_PRIVATE_KEY"; exit 1; }
 
-      # 將 SA 金鑰傳到 VM（指定 -i 並關閉嚴格檢查，以免第一次連線卡住）
+      # 上傳 SA 金鑰至 VM（供 docker login 使用）
       - name: Upload SA key to VM
         run: |
           printf "%s" '${{ secrets.GCP_SA_KEY }}' > ar_key.json
@@ -107,13 +104,12 @@ jobs:
             ar_key.json ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }}:/tmp/ar_key.json
           rm -f ar_key.json
 
-      # 在 VM：docker login / pull / run（同樣帶 -i 與 accept-new）
+      # 在 VM 上登入 / 拉取 / 重啟容器
       - name: Remote deploy on VM
         run: |
           ssh -i "$HOME/.ssh/id_vm" -o StrictHostKeyChecking=accept-new \
             ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }} << 'EOF'
           set -euxo pipefail
-
           REGION_RAW='${{ secrets.GCP_REGION }}'
           REGION="$(printf "%s" "$REGION_RAW" | tr -d '\r\n' | xargs)"
           REGISTRY="${REGION}-docker.pkg.dev"
