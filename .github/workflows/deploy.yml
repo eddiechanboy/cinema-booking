@@ -5,10 +5,12 @@ on:
     branches: [ "main" ]
   workflow_dispatch:
 
+# (可選) 同一時間只跑一次，新的會取消舊的
 concurrency:
   group: deploy-to-vm
   cancel-in-progress: true
 
+# (可選) 權限最小化
 permissions:
   contents: read
 
@@ -25,6 +27,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      # 0) 驗證 Secrets 是否存在
       - name: Validate required secrets
         env:
           GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
@@ -47,6 +50,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      # ✅ 不用 gcloud：直接用 _json_key 對 Artifact Registry 登入
       - name: Docker login to Artifact Registry (runner)
         run: |
           set -euo pipefail
@@ -75,19 +79,43 @@ jobs:
       # ✅ Decode Base64 SSH key, 不會有多行錯誤
       - name: Prepare SSH key
         run: |
+          set -euo pipefail
           mkdir -p "$HOME/.ssh"
           chmod 700 "$HOME/.ssh"
           touch "$HOME/.ssh/known_hosts"
           chmod 644 "$HOME/.ssh/known_hosts"
-          umask 077
-          echo "${{ secrets.SSH_PRIVATE_KEY_B64 }}" | base64 -d > "$HOME/.ssh/id_vm"
+
+          # 用 printf 還原 Base64（避免 echo 多加換行）
+          if [ -z "${SSH_PRIVATE_KEY_B64:-}" ]; then
+            echo "[fatal] Secret SSH_PRIVATE_KEY_B64 is empty or missing"
+            exit 1
+          fi
+          printf %s "$SSH_PRIVATE_KEY_B64" | base64 -d > "$HOME/.ssh/id_vm" || { echo "[fatal] base64 decode failed"; exit 1; }
+
+          # 去除 CRLF，設正確權限
+          tr -d '\r' < "$HOME/.ssh/id_vm" > "$HOME/.ssh/id_vm.tmp" && mv "$HOME/.ssh/id_vm.tmp" "$HOME/.ssh/id_vm"
           chmod 600 "$HOME/.ssh/id_vm"
-          ssh-keyscan -H "${{ secrets.VM_HOST }}" >> "$HOME/.ssh/known_hosts" || true
+
+          # 加入 host key（失敗不擋）
+          ssh-keyscan -H "$VM_HOST" >> "$HOME/.ssh/known_hosts" || true
+
+          # 偵錯（不洩漏內容）
+          echo "== id_vm header =="; head -n 1 "$HOME/.ssh/id_vm" || true
+          echo "== id_vm footer =="; tail -n 1 "$HOME/.ssh/id_vm" || true
+          echo "== has BEGIN/END =="; (grep -q "BEGIN OPENSSH" "$HOME/.ssh/id_vm" && grep -q "END OPENSSH" "$HOME/.ssh/id_vm" && echo yes) || echo no
 
       - name: Validate SSH key format
         run: |
-          ssh-keygen -yf -f "$HOME/.ssh/id_vm" >/dev/null 2>&1 || { echo "Invalid or encrypted SSH_PRIVATE_KEY_B64"; exit 1; }
+          set -e
+          if ssh-keygen -yf -f "$HOME/.ssh/id_vm" >/tmp/derived_pub 2>/dev/null; then
+            echo "Public key prefix (expect ssh-ed25519 or ssh-rsa):"
+            head -c 20 /tmp/derived_pub; echo
+          else
+            echo "Invalid or encrypted SSH_PRIVATE_KEY_B64"
+            exit 1
+          fi
 
+      # 上傳 SA 金鑰至 VM（供 docker login 使用）
       - name: Upload SA key to VM
         run: |
           printf "%s" '${{ secrets.GCP_SA_KEY }}' > ar_key.json
@@ -95,6 +123,7 @@ jobs:
             ar_key.json ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }}:/tmp/ar_key.json
           rm -f ar_key.json
 
+      # 在 VM 上登入 / 拉取 / 重啟容器
       - name: Remote deploy on VM
         run: |
           ssh -i "$HOME/.ssh/id_vm" -o StrictHostKeyChecking=accept-new \
