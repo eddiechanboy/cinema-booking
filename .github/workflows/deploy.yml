@@ -5,12 +5,10 @@ on:
     branches: [ "main" ]
   workflow_dispatch:
 
-# (可選) 同一時間只跑一次，新的會取消舊的
 concurrency:
   group: deploy-to-vm
   cancel-in-progress: true
 
-# (可選) 權限最小化
 permissions:
   contents: read
 
@@ -27,7 +25,6 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # 0) 驗證 Secrets 是否存在
       - name: Validate required secrets
         env:
           GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
@@ -35,10 +32,10 @@ jobs:
           GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
           VM_HOST: ${{ secrets.VM_HOST }}
           VM_USER: ${{ secrets.VM_USER }}
-          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          SSH_PRIVATE_KEY_B64: ${{ secrets.SSH_PRIVATE_KEY_B64 }}
         run: |
           set -euo pipefail
-          for name in GCP_PROJECT_ID GCP_REGION GCP_SA_KEY VM_HOST VM_USER SSH_PRIVATE_KEY; do
+          for name in GCP_PROJECT_ID GCP_REGION GCP_SA_KEY VM_HOST VM_USER SSH_PRIVATE_KEY_B64; do
             val="${!name:-}"
             if [ -z "$val" ]; then
               echo "Missing $name"
@@ -50,7 +47,6 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      # ✅ 不用 gcloud：直接用 _json_key 對 Artifact Registry 登入
       - name: Docker login to Artifact Registry (runner)
         run: |
           set -euo pipefail
@@ -64,39 +60,34 @@ jobs:
 
       - name: Build Docker image
         run: |
-          set -euo pipefail
-          IMG='${{ env.FULL_IMAGE }}'
+          IMG="${{ env.FULL_IMAGE }}"
           IMG="$(printf "%s" "$IMG" | tr -d '\r\n' | xargs)"
           echo "Building image: $IMG"
           docker build -t "$IMG" .
 
       - name: Push image to Artifact Registry
         run: |
-          set -euo pipefail
-          IMG='${{ env.FULL_IMAGE }}'
+          IMG="${{ env.FULL_IMAGE }}"
           IMG="$(printf "%s" "$IMG" | tr -d '\r\n' | xargs)"
           echo "Pushing image: $IMG"
           docker push "$IMG"
 
-      # 準備 SSH（徹底處理 ~/.ssh/known_hosts 不存在問題）
-      - name: Prepare SSH (dir, key, known_hosts)
+      # ✅ Decode Base64 SSH key, 不會有多行錯誤
+      - name: Prepare SSH key
         run: |
-          set -euo pipefail
           mkdir -p "$HOME/.ssh"
           chmod 700 "$HOME/.ssh"
           touch "$HOME/.ssh/known_hosts"
           chmod 644 "$HOME/.ssh/known_hosts"
           umask 077
-          printf "%s" '${{ secrets.SSH_PRIVATE_KEY }}' > "$HOME/.ssh/id_vm"
+          echo "${{ secrets.SSH_PRIVATE_KEY_B64 }}" | base64 -d > "$HOME/.ssh/id_vm"
           chmod 600 "$HOME/.ssh/id_vm"
-          # 預先加入 host key；失敗也不阻擋，後續 accept-new
           ssh-keyscan -H "${{ secrets.VM_HOST }}" >> "$HOME/.ssh/known_hosts" || true
 
       - name: Validate SSH key format
         run: |
-          ssh-keygen -yf -f "$HOME/.ssh/id_vm" >/dev/null 2>&1 || { echo "Invalid or encrypted SSH_PRIVATE_KEY"; exit 1; }
+          ssh-keygen -yf -f "$HOME/.ssh/id_vm" >/dev/null 2>&1 || { echo "Invalid or encrypted SSH_PRIVATE_KEY_B64"; exit 1; }
 
-      # 上傳 SA 金鑰至 VM（供 docker login 使用）
       - name: Upload SA key to VM
         run: |
           printf "%s" '${{ secrets.GCP_SA_KEY }}' > ar_key.json
@@ -104,7 +95,6 @@ jobs:
             ar_key.json ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }}:/tmp/ar_key.json
           rm -f ar_key.json
 
-      # 在 VM 上登入 / 拉取 / 重啟容器
       - name: Remote deploy on VM
         run: |
           ssh -i "$HOME/.ssh/id_vm" -o StrictHostKeyChecking=accept-new \
