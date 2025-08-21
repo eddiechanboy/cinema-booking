@@ -87,6 +87,12 @@ jobs:
             ar_key.json ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }}:/tmp/ar_key.json
           rm -f ar_key.json
 
+      - name: Debug SSH
+        run: |
+            echo "Trying SSH to $VM_USER@$VM_HOST"
+            ssh -v -o StrictHostKeyChecking=no $VM_USER@$VM_HOST "echo ✅ Connected!"
+
+
       - name: Remote deploy on VM
         run: |
           ssh -o StrictHostKeyChecking=accept-new \
