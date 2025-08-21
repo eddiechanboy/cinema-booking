@@ -35,10 +35,10 @@ jobs:
           GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
           VM_HOST: ${{ secrets.VM_HOST }}
           VM_USER: ${{ secrets.VM_USER }}
-          SSH_PRIVATE_KEY_B64: ${{ secrets.SSH_PRIVATE_KEY_B64 }}
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
         run: |
           set -euo pipefail
-          for name in GCP_PROJECT_ID GCP_REGION GCP_SA_KEY VM_HOST VM_USER SSH_PRIVATE_KEY_B64; do
+          for name in GCP_PROJECT_ID GCP_REGION GCP_SA_KEY VM_HOST VM_USER SSH_PRIVATE_KEY; do
             val="${!name:-}"
             if [ -z "$val" ]; then
               echo "Missing $name"
@@ -76,7 +76,7 @@ jobs:
           echo "Pushing image: $IMG"
           docker push "$IMG"
 
-      # ✅ Decode Base64 SSH key, 不會有多行錯誤
+      # ✅ Prepare SSH key
       - name: Prepare SSH key
         run: |
           set -euo pipefail
@@ -85,12 +85,12 @@ jobs:
           touch "$HOME/.ssh/known_hosts"
           chmod 644 "$HOME/.ssh/known_hosts"
 
-          # 用 printf 還原 Base64（避免 echo 多加換行）
-          if [ -z "${SSH_PRIVATE_KEY_B64:-}" ]; then
-            echo "[fatal] Secret SSH_PRIVATE_KEY_B64 is empty or missing"
+          # 用 printf 儲存 SSH_PRIVATE_KEY
+          if [ -z "${SSH_PRIVATE_KEY:-}" ]; then
+            echo "[fatal] Secret SSH_PRIVATE_KEY is empty or missing"
             exit 1
           fi
-          printf %s "$SSH_PRIVATE_KEY_B64" | base64 -d > "$HOME/.ssh/id_vm" || { echo "[fatal] base64 decode failed"; exit 1; }
+          printf "%s" "${SSH_PRIVATE_KEY}" > "$HOME/.ssh/id_vm" || { echo "[fatal] SSH private key saving failed"; exit 1; }
 
           # 去除 CRLF，設正確權限
           tr -d '\r' < "$HOME/.ssh/id_vm" > "$HOME/.ssh/id_vm.tmp" && mv "$HOME/.ssh/id_vm.tmp" "$HOME/.ssh/id_vm"
@@ -104,6 +104,7 @@ jobs:
           echo "== id_vm footer =="; tail -n 1 "$HOME/.ssh/id_vm" || true
           echo "== has BEGIN/END =="; (grep -q "BEGIN OPENSSH" "$HOME/.ssh/id_vm" && grep -q "END OPENSSH" "$HOME/.ssh/id_vm" && echo yes) || echo no
 
+      # Validate SSH key format
       - name: Validate SSH key format
         run: |
           set -e
@@ -111,7 +112,7 @@ jobs:
             echo "Public key prefix (expect ssh-ed25519 or ssh-rsa):"
             head -c 20 /tmp/derived_pub; echo
           else
-            echo "Invalid or encrypted SSH_PRIVATE_KEY_B64"
+            echo "Invalid or encrypted SSH_PRIVATE_KEY"
             exit 1
           fi
 
@@ -149,3 +150,4 @@ jobs:
 
           rm -f /tmp/ar_key.json
           EOF
+
