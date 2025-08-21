@@ -1,0 +1,30 @@
+name: Test SSH Connection
+
+on:
+  workflow_dispatch:
+
+jobs:
+  ssh-test:
+    runs-on: ubuntu-latest
+    env:
+      VM_USER: ${{ secrets.VM_USER }}
+      VM_HOST: ${{ secrets.VM_HOST }}
+      SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+    steps:
+      - name: Start SSH agent
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+
+      - name: Test SSH connection
+        run: |
+          set -euo pipefail
+          
+          if [ -z "$VM_USER" ] || [ -z "$VM_HOST" ]; then
+            echo "❌ VM_USER or VM_HOST is missing"
+            exit 1
+          fi
+
+          echo "🔎 Trying to SSH to $VM_USER@$VM_HOST..."
+          
+          ssh -vvv -o StrictHostKeyChecking=no $VM_USER@$VM_HOST "echo ✅ Connected!"
