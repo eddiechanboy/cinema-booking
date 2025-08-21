@@ -50,6 +50,12 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      # 更新這行版本為 v0.9.0
+      - name: Start SSH agent
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+
       # ✅ 不用 gcloud：直接用 _json_key 對 Artifact Registry 登入
       - name: Docker login to Artifact Registry (runner)
         run: |
@@ -150,4 +156,3 @@ jobs:
 
           rm -f /tmp/ar_key.json
           EOF
-
