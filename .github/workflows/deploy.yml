@@ -43,6 +43,9 @@ jobs:
             fi
           done
           echo "All required secrets present."
+              # 🔎 額外 debug（只印出 VM_USER / VM_HOST，不會洩漏其他秘密）
+          echo "VM_USER = $VM_USER"
+          echo "VM_HOST = $VM_HOST"
 
       - name: Checkout code
         uses: actions/checkout@v4
