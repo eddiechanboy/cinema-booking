@@ -2,7 +2,7 @@ name: Deploy Django to GCP COS VM
 
 on:
   push:
-    branches: [ "main" ]
+    branches: ["main"]
   workflow_dispatch:
 
 concurrency:
@@ -14,9 +14,6 @@ permissions:
 
 env:
   IMAGE_NAME: django-app
-  REGION: ${{ secrets.GCP_REGION }}
-  PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
-  REPO: django-demo
   IMAGE_TAG: ${{ github.sha }}
   FULL_IMAGE: ${{ secrets.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/django-demo/django-app:${{ github.sha }}
 
@@ -25,6 +22,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      # 1️⃣ 驗證 Secrets
       - name: Validate required secrets
         env:
           GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
@@ -43,19 +41,13 @@ jobs:
             fi
           done
           echo "All required secrets present."
-              # 🔎 額外 debug（只印出 VM_USER / VM_HOST，不會洩漏其他秘密）
-          echo "VM_USER = $VM_USER"
-          echo "VM_HOST = $VM_HOST"
 
+      # 2️⃣ Checkout code
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Start SSH agent
-        uses: webfactory/ssh-agent@v0.9.0
-        with:
-          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
-
-      - name: Docker login to Artifact Registry (runner)
+      # 3️⃣ Docker login to Artifact Registry
+      - name: Docker login to Artifact Registry
         run: |
           set -euo pipefail
           REGION_RAW='${{ secrets.GCP_REGION }}'
@@ -66,6 +58,7 @@ jobs:
           docker login -u _json_key --password-stdin "$REGISTRY" < sa.json
           echo "Logged in to $REGISTRY"
 
+      # 4️⃣ Build Docker image
       - name: Build Docker image
         run: |
           IMG="${{ env.FULL_IMAGE }}"
@@ -73,6 +66,7 @@ jobs:
           echo "Building image: $IMG"
           docker build -t "$IMG" .
 
+      # 5️⃣ Push Docker image
       - name: Push image to Artifact Registry
         run: |
           IMG="${{ env.FULL_IMAGE }}"
@@ -80,22 +74,48 @@ jobs:
           echo "Pushing image: $IMG"
           docker push "$IMG"
 
+      # 6️⃣ Prepare SSH key
+      - name: Prepare SSH key
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.ssh"
+          chmod 700 "$HOME/.ssh"
+          touch "$HOME/.ssh/known_hosts"
+          chmod 644 "$HOME/.ssh/known_hosts"
+
+          if [ -z "${SSH_PRIVATE_KEY:-}" ]; then
+            echo "[fatal] Secret SSH_PRIVATE_KEY is empty or missing"
+            exit 1
+          fi
+          printf "%s" "${SSH_PRIVATE_KEY}" > "$HOME/.ssh/id_vm"
+          tr -d '\r' < "$HOME/.ssh/id_vm" > "$HOME/.ssh/id_vm.tmp" && mv "$HOME/.ssh/id_vm.tmp" "$HOME/.ssh/id_vm"
+          chmod 600 "$HOME/.ssh/id_vm"
+
+          ssh-keyscan -H "$VM_HOST" >> "$HOME/.ssh/known_hosts" || true
+
+      # 7️⃣ Validate SSH key
+      - name: Validate SSH key
+        run: |
+          set -e
+          if ssh-keygen -yf -f "$HOME/.ssh/id_vm" >/tmp/derived_pub 2>/dev/null; then
+            echo "SSH key format OK"
+          else
+            echo "Invalid SSH_PRIVATE_KEY"
+            exit 1
+          fi
+
+      # 8️⃣ Upload SA key to VM
       - name: Upload SA key to VM
         run: |
           printf "%s" '${{ secrets.GCP_SA_KEY }}' > ar_key.json
-          scp -o StrictHostKeyChecking=accept-new -q \
+          scp -i "$HOME/.ssh/id_vm" -o StrictHostKeyChecking=accept-new -q \
             ar_key.json ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }}:/tmp/ar_key.json
           rm -f ar_key.json
 
-      - name: Debug SSH
-        run: |
-            echo "Trying SSH to $VM_USER@$VM_HOST"
-            ssh -v -o StrictHostKeyChecking=no $VM_USER@$VM_HOST "echo ✅ Connected!"
-
-
+      # 9️⃣ Remote deploy on COS VM
       - name: Remote deploy on VM
         run: |
-          ssh -o StrictHostKeyChecking=accept-new \
+          ssh -i "$HOME/.ssh/id_vm" -o StrictHostKeyChecking=accept-new \
             ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }} << 'EOF'
           set -euxo pipefail
           REGION_RAW='${{ secrets.GCP_REGION }}'
