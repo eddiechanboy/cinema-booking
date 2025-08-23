@@ -1,0 +1,42 @@
+name: Validate SSH Key
+
+on:
+  workflow_dispatch:
+
+jobs:
+  check-ssh-key:
+    runs-on: ubuntu-latest
+    steps:
+      # 1️⃣ Checkout code (可選，純檢查 Secret 可不需要)
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # 2️⃣ 檢查 Secret 是否存在
+      - name: Check GCP_VM_SSH_KEY secret
+        run: |
+          if [ -z "${{ secrets.GCP_VM_SSH_KEY }}" ]; then
+            echo "[fatal] GCP_VM_SSH_KEY is empty or missing"
+            exit 1
+          else
+            echo "GCP_VM_SSH_KEY is set."
+          fi
+
+      # 3️⃣ 檢查 SSH 私鑰格式
+      - name: Validate SSH private key format
+        run: |
+          mkdir -p $HOME/.ssh
+          echo "${{ secrets.GCP_VM_SSH_KEY }}" > $HOME/.ssh/id_vm_test
+          chmod 600 $HOME/.ssh/id_vm_test
+
+          if ssh-keygen -yf $HOME/.ssh/id_vm_test >/dev/null 2>&1; then
+            echo "SSH private key format is valid ✅"
+          else
+            echo "[fatal] Invalid SSH private key ❌"
+            exit 1
+          fi
+
+      # 4️⃣ 選擇性：測試連線（需有 VM_HOST 與 VM_USER secret）
+      - name: Test SSH connection (optional)
+        if: ${{ secrets.VM_HOST && secrets.VM_USER }}
+        run: |
+          ssh -i $HOME/.ssh/id_vm_test -o StrictHostKeyChecking=accept-new ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }} "echo 'SSH connection works!'"
