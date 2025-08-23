@@ -6,71 +6,84 @@ on:
   workflow_dispatch:
 
 jobs:
-  deploy:
+  build-and-deploy:
     runs-on: ubuntu-latest
     env:
-      VM_HOST: ${{ secrets.VM_HOST }}
-      VM_USER: ${{ secrets.VM_USER }}
-      GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
-      GCP_REGION: ${{ secrets.GCP_REGION }}
-      GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
       IMAGE_NAME: django-app
       IMAGE_TAG: ${{ github.sha }}
       FULL_IMAGE: ${{ secrets.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/django-demo/django-app:${{ github.sha }}
+
     steps:
       # 1️⃣ Checkout code
-      - name: Checkout
+      - name: Checkout code
         uses: actions/checkout@v4
 
-      # 2️⃣ Start SSH agent and add private key from Secret
+      # 2️⃣ Start SSH agent and load private key
       - name: Start SSH agent
         uses: webfactory/ssh-agent@v0.9.0
         with:
           ssh-private-key: ${{ secrets.GCP_VM_SSH_KEY }}
 
-      # 3️⃣ Docker login to Artifact Registry
+      # 3️⃣ Validate required secrets
+      - name: Validate secrets
+        run: |
+          set -euo pipefail
+          for name in GCP_PROJECT_ID GCP_REGION GCP_SA_KEY VM_HOST VM_USER; do
+            val="${{ secrets[name] }}"
+            if [ -z "$val" ]; then
+              echo "Missing $name"
+              exit 1
+            fi
+          done
+          echo "All required secrets present."
+
+      # 4️⃣ Debug Artifact Registry login info
+      - name: Debug Artifact Registry
+        run: |
+          echo "REGION=${{ secrets.GCP_REGION }}"
+          echo "REGISTRY=${{ secrets.GCP_REGION }}-docker.pkg.dev"
+          echo "FULL_IMAGE=${{ env.FULL_IMAGE }}"
+          echo "Checking docker version..."
+          docker --version
+
+      # 5️⃣ Docker login to Artifact Registry
       - name: Docker login
         run: |
-          echo "${{ secrets.GCP_SA_KEY }}" > sa.json
-          REGISTRY="${{ secrets.GCP_REGION }}-docker.pkg.dev"
-          docker logout "$REGISTRY" || true
-          docker login -u _json_key --password-stdin "$REGISTRY" < sa.json
-          rm -f sa.json
+          echo "${{ secrets.GCP_SA_KEY }}" | docker login -u _json_key --password-stdin "${{ secrets.GCP_REGION }}-docker.pkg.dev"
 
-      # 4️⃣ Build Docker image
+      # 6️⃣ Build Docker image
       - name: Build Docker image
         run: |
           docker build -t "${{ env.FULL_IMAGE }}" .
 
-      # 5️⃣ Push Docker image
+      # 7️⃣ Push Docker image
       - name: Push Docker image
         run: |
           docker push "${{ env.FULL_IMAGE }}"
 
-      # 6️⃣ Deploy to COS VM
-      - name: Deploy on VM
+      # 8️⃣ Upload SA key to VM
+      - name: Upload SA key to VM
         run: |
-          ssh -o StrictHostKeyChecking=accept-new ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }} << 'EOF'
+          echo "${{ secrets.GCP_SA_KEY }}" > ar_key.json
+          scp -o StrictHostKeyChecking=no ar_key.json ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }}:/tmp/ar_key.json
+          rm -f ar_key.json
+
+      # 9️⃣ Remote deploy on COS VM
+      - name: Remote deploy on VM
+        run: |
+          ssh -o StrictHostKeyChecking=no ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }} << 'EOF'
           set -euxo pipefail
-
-          REGION_RAW='${{ secrets.GCP_REGION }}'
-          REGION="$(printf "%s" "$REGION_RAW" | tr -d '\r\n' | xargs)"
+          REGION="${{ secrets.GCP_REGION }}"
           REGISTRY="${REGION}-docker.pkg.dev"
+          FULL_IMAGE="${{ env.FULL_IMAGE }}"
 
-          echo "${{ secrets.GCP_SA_KEY }}" > /tmp/ar_key.json
           sudo docker logout "$REGISTRY" || true
           sudo docker login -u _json_key --password-stdin "$REGISTRY" < /tmp/ar_key.json
-
-          FULL_IMAGE_RAW='${{ env.FULL_IMAGE }}'
-          FULL_IMAGE="$(printf "%s" "$FULL_IMAGE_RAW" | tr -d '\r\n' | xargs)"
 
           sudo docker pull "$FULL_IMAGE"
           sudo docker stop django-app || true
           sudo docker rm django-app || true
-          sudo docker run -d --name django-app \
-            -p 8080:8080 \
-            --restart=always \
-            "$FULL_IMAGE"
+          sudo docker run -d --name django-app -p 8080:8080 --restart=always "$FULL_IMAGE"
 
           rm -f /tmp/ar_key.json
           EOF
