@@ -30,10 +30,10 @@ jobs:
           GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
           VM_HOST: ${{ secrets.VM_HOST }}
           VM_USER: ${{ secrets.VM_USER }}
-          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          GCP_VM_SSH_KEY: ${{ secrets.GCP_VM_SSH_KEY }}
         run: |
           set -euo pipefail
-          for name in GCP_PROJECT_ID GCP_REGION GCP_SA_KEY VM_HOST VM_USER SSH_PRIVATE_KEY; do
+          for name in GCP_PROJECT_ID GCP_REGION GCP_SA_KEY VM_HOST VM_USER GCP_VM_SSH_KEY; do
             val="${!name:-}"
             if [ -z "$val" ]; then
               echo "Missing $name"
@@ -83,11 +83,11 @@ jobs:
           touch "$HOME/.ssh/known_hosts"
           chmod 644 "$HOME/.ssh/known_hosts"
 
-          if [ -z "${SSH_PRIVATE_KEY:-}" ]; then
-            echo "[fatal] Secret SSH_PRIVATE_KEY is empty or missing"
+          if [ -z "${GCP_VM_SSH_KEY:-}" ]; then
+            echo "[fatal] Secret GCP_VM_SSH_KEY is empty or missing"
             exit 1
           fi
-          printf "%s" "${SSH_PRIVATE_KEY}" > "$HOME/.ssh/id_vm"
+          printf "%s" "${GCP_VM_SSH_KEY}" > "$HOME/.ssh/id_vm"
           tr -d '\r' < "$HOME/.ssh/id_vm" > "$HOME/.ssh/id_vm.tmp" && mv "$HOME/.ssh/id_vm.tmp" "$HOME/.ssh/id_vm"
           chmod 600 "$HOME/.ssh/id_vm"
 
@@ -100,7 +100,7 @@ jobs:
           if ssh-keygen -yf -f "$HOME/.ssh/id_vm" >/tmp/derived_pub 2>/dev/null; then
             echo "SSH key format OK"
           else
-            echo "Invalid SSH_PRIVATE_KEY"
+            echo "Invalid GCP_VM_SSH_KEY"
             exit 1
           fi
 
@@ -118,20 +118,21 @@ jobs:
           ssh -i "$HOME/.ssh/id_vm" -o StrictHostKeyChecking=accept-new \
             ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }} << 'EOF'
           set -euxo pipefail
+
           REGION_RAW='${{ secrets.GCP_REGION }}'
           REGION="$(printf "%s" "$REGION_RAW" | tr -d '\r\n' | xargs)"
           REGISTRY="${REGION}-docker.pkg.dev"
 
-          sudo docker logout "$REGISTRY" || true
-          sudo docker login -u _json_key --password-stdin "$REGISTRY" < /tmp/ar_key.json
+          docker logout "$REGISTRY" || true
+          docker login -u _json_key --password-stdin "$REGISTRY" < /tmp/ar_key.json
 
           FULL_IMAGE_RAW='${{ env.FULL_IMAGE }}'
           FULL_IMAGE="$(printf "%s" "$FULL_IMAGE_RAW" | tr -d '\r\n' | xargs)"
 
-          sudo docker pull "$FULL_IMAGE"
-          sudo docker stop django-app || true
-          sudo docker rm django-app || true
-          sudo docker run -d --name django-app \
+          docker pull "$FULL_IMAGE"
+          docker stop django-app || true
+          docker rm django-app || true
+          docker run -d --name django-app \
             -p 8080:8080 \
             --restart=always \
             "$FULL_IMAGE"
