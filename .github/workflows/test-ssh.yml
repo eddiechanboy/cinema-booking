@@ -5,98 +5,59 @@ on:
     branches: ["main"]
   workflow_dispatch:
 
-concurrency:
-  group: deploy-to-vm
-  cancel-in-progress: true
-
-permissions:
-  contents: read
-
-env:
-  IMAGE_NAME: django-app
-  IMAGE_TAG: ${{ github.sha }}
-  FULL_IMAGE: ${{ secrets.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/django-demo/django-app:${{ github.sha }}
-
 jobs:
-  build-and-deploy:
+  deploy:
     runs-on: ubuntu-latest
-
+    env:
+      VM_HOST: ${{ secrets.VM_HOST }}
+      VM_USER: ${{ secrets.VM_USER }}
+      GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+      GCP_REGION: ${{ secrets.GCP_REGION }}
+      GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
+      IMAGE_NAME: django-app
+      IMAGE_TAG: ${{ github.sha }}
+      FULL_IMAGE: ${{ secrets.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/django-demo/django-app:${{ github.sha }}
     steps:
-      # 1️⃣ 驗證 Secrets
-      - name: Validate required secrets
-        env:
-          GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
-          GCP_REGION: ${{ secrets.GCP_REGION }}
-          GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
-          VM_HOST: ${{ secrets.VM_HOST }}
-          VM_USER: ${{ secrets.VM_USER }}
-          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
-        run: |
-          set -euo pipefail
-          for name in GCP_PROJECT_ID GCP_REGION GCP_SA_KEY VM_HOST VM_USER SSH_PRIVATE_KEY; do
-            val="${!name:-}"
-            if [ -z "$val" ]; then
-              echo "Missing $name"
-              exit 1
-            fi
-          done
-          echo "All required secrets present."
-
-      # 2️⃣ Checkout code
-      - name: Checkout code
+      # 1️⃣ Checkout code
+      - name: Checkout
         uses: actions/checkout@v4
 
+      # 2️⃣ Start SSH agent and add private key from Secret
+      - name: Start SSH agent
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.GCP_VM_SSH_KEY }}
+
       # 3️⃣ Docker login to Artifact Registry
-      - name: Docker login to Artifact Registry
+      - name: Docker login
         run: |
-          set -euo pipefail
-          REGION_RAW='${{ secrets.GCP_REGION }}'
-          REGION="$(printf "%s" "$REGION_RAW" | tr -d '\r\n' | xargs)"
-          REGISTRY="${REGION}-docker.pkg.dev"
-          printf "%s" '${{ secrets.GCP_SA_KEY }}' > sa.json
+          echo "${{ secrets.GCP_SA_KEY }}" > sa.json
+          REGISTRY="${{ secrets.GCP_REGION }}-docker.pkg.dev"
           docker logout "$REGISTRY" || true
           docker login -u _json_key --password-stdin "$REGISTRY" < sa.json
-          echo "Logged in to $REGISTRY"
+          rm -f sa.json
 
       # 4️⃣ Build Docker image
       - name: Build Docker image
         run: |
-          IMG="${{ env.FULL_IMAGE }}"
-          IMG="$(printf "%s" "$IMG" | tr -d '\r\n' | xargs)"
-          echo "Building image: $IMG"
-          docker build -t "$IMG" .
+          docker build -t "${{ env.FULL_IMAGE }}" .
 
       # 5️⃣ Push Docker image
-      - name: Push image to Artifact Registry
+      - name: Push Docker image
         run: |
-          IMG="${{ env.FULL_IMAGE }}"
-          IMG="$(printf "%s" "$IMG" | tr -d '\r\n' | xargs)"
-          echo "Pushing image: $IMG"
-          docker push "$IMG"
+          docker push "${{ env.FULL_IMAGE }}"
 
-      # 6️⃣ Start SSH agent
-      - name: Start SSH agent
-        uses: webfactory/ssh-agent@v0.9.0
-        with:
-          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
-
-      # 7️⃣ Upload SA key to VM
-      - name: Upload SA key to VM
+      # 6️⃣ Deploy to COS VM
+      - name: Deploy on VM
         run: |
-          printf "%s" '${{ secrets.GCP_SA_KEY }}' > ar_key.json
-          scp -o StrictHostKeyChecking=no -q \
-            ar_key.json ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }}:/tmp/ar_key.json
-          rm -f ar_key.json
-
-      # 8️⃣ Remote deploy on COS VM
-      - name: Remote deploy on VM
-        run: |
-          ssh -o StrictHostKeyChecking=no ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }} << 'EOF'
+          ssh -o StrictHostKeyChecking=accept-new ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }} << 'EOF'
           set -euxo pipefail
+
           REGION_RAW='${{ secrets.GCP_REGION }}'
           REGION="$(printf "%s" "$REGION_RAW" | tr -d '\r\n' | xargs)"
           REGISTRY="${REGION}-docker.pkg.dev"
 
+          echo "${{ secrets.GCP_SA_KEY }}" > /tmp/ar_key.json
           sudo docker logout "$REGISTRY" || true
           sudo docker login -u _json_key --password-stdin "$REGISTRY" < /tmp/ar_key.json
 
